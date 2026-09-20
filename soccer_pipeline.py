@@ -18,7 +18,7 @@ for f in sorted(glob.glob('data/season-*.csv')):
     df = pd.read_csv(f)
     frames.append(df)
 matches = pd.concat(frames, ignore_index=True)
-matches['Date'] = pd.to_datetime(matches['Date'])
+matches['Date'] = pd.to_datetime(matches['Date'], format='%d/%m/%Y')
 matches = matches.sort_values('Date').reset_index(drop=True)
 matches = matches.dropna(subset=['FTHG', 'FTAG', 'FTR'])
 
