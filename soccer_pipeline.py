@@ -1,6 +1,7 @@
 """
 Soccer match outcome prediction pipeline.
-Data: football-data.co.uk EPL results (2020-21, 2021-22, partial 2022-23), 770 matches.
+Author: Charlie Blake
+Data: football-data.co.uk EPL results...
 """
 import pandas as pd
 import numpy as np
