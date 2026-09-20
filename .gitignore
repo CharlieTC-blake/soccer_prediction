@@ -1,0 +1,9 @@
+# Ignore Python cache files
+__pycache__/
+*.pyc
+
+# Ignore output that can be regenerated
+results_summary.txt
+
+# Ignore VS Code settings
+.vscode/
