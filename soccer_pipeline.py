@@ -3,13 +3,14 @@ Soccer match outcome prediction pipeline.
 Author: Charlie Blake
 Data: football-data.co.uk EPL results...
 """
+# Section 0: The Imports
 import pandas as pd
 import numpy as np
 import glob
 from sklearn.linear_model import LogisticRegression
 from sklearn.metrics import brier_score_loss, log_loss, accuracy_score
 
-pd.set_option('display.width', 120)
+pd.set_option('display.width', 120) 
 
 # ---------- 1. Load ----------
 frames = []
