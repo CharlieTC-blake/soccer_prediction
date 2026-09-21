@@ -15,7 +15,10 @@ st.set_page_config(page_title="Soccer Predictor", page_icon="⚽", layout="cente
 @st.cache_data
 def load_and_prepare():
     frames = []
-    for f in sorted(glob.glob('data/season-*.csv')):
+    import os
+base_dir = os.path.dirname(os.path.abspath(__file__))
+data_dir = os.path.join(base_dir, 'data')
+for f in sorted(glob.glob(os.path.join(data_dir, 'season-*.csv'))):
         df = pd.read_csv(f)
         frames.append(df)
     matches = pd.concat(frames, ignore_index=True)
