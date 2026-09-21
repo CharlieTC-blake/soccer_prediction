@@ -1,0 +1,51 @@
+PS C:\Users\LENOVO\Desktop\Personal Files\soccer_prediction> python backtest.py
+Loaded 1140 matches, 2020-09-12 to 2023-05-28
+C:\Users\LENOVO\Desktop\Personal Files\soccer_prediction\backtest.py:81: PerformanceWarning: DataFrame is highly fragmented.  This is usually the result of calling `frame.insert` many times, which has poor performance.  Consider joining all columns at once using pd.concat(axis=1) instead. To get a de-fragmented frame, use `newframe = frame.copy()`
+  matches['form_diff'] = [hf - af for hf, af in zip(home_form, away_form)]
+C:\Users\LENOVO\Desktop\Personal Files\soccer_prediction\backtest.py:93: PerformanceWarning: DataFrame is highly fragmented.  This is usually the result of calling `frame.insert` many times, which has poor performance.  Consider joining all columns at once using pd.concat(axis=1) instead. To get a de-fragmented frame, use `newframe = frame.copy()`
+  matches['rest_diff'] = [hr - ar for hr, ar in zip(home_rest, away_rest)]
+C:\Users\LENOVO\Desktop\Personal Files\soccer_prediction\backtest.py:97: PerformanceWarning: DataFrame is highly fragmented.  This is usually the result of calling `frame.insert` many times, which has poor performance.  Consider joining all columns at once using pd.concat(axis=1) instead. To get a de-fragmented frame, use `newframe = frame.copy()`
+  matches['target'] = matches['FTR'].map(label_map)
+Train: 563 matches
+Test:  577 matches
+
+Average bookmaker overround: 5.41%
+
+=== EXPERIMENT 1: Varying the edge threshold (bet all outcomes) ===
+ Threshold   Bets   WinRate    Profit      ROI
+      3.0%    528     36.0% £ -53.23  -10.08%
+      5.0%    399     37.3% £ -19.60   -4.91%
+      8.0%    264     38.6% £  -0.27   -0.10%
+     10.0%    190     41.6% £ +21.88  +11.52%
+     12.0%    132     37.9% £ +14.86  +11.26%
+     15.0%     67     28.4% £  -5.15   -7.69%
+
+=== EXPERIMENT 2: Excluding away bets ===
+ Threshold   Bets   WinRate    Profit      ROI
+      3.0%    166     44.6% £ -11.43   -6.89%
+      5.0%    100     51.0% £  +8.42   +8.42%
+      8.0%     54     53.7% £  +3.27   +6.06%
+     10.0%     35     60.0% £  +9.15  +26.14%
+     12.0%     18     61.1% £  +8.51  +47.28%
+     15.0%      8     50.0% £  +7.20  +90.00%
+
+=== EXPERIMENT 3: Home bets only ===
+ Threshold   Bets   WinRate    Profit      ROI
+      3.0%    129     52.7% £  -6.93   -5.37%
+      5.0%     87     55.2% £  +3.92   +4.51%
+      8.0%     52     53.8% £  -0.73   -1.40%
+     10.0%     33     60.6% £  +5.15  +15.61%
+     12.0%     16     62.5% £  +4.51  +28.19%
+     15.0%      6     50.0% £  +3.20  +53.33%
+
+=== EXPERIMENT 4: Draw bets only ===
+ Threshold   Bets   WinRate    Profit      ROI
+      3.0%     37     16.2% £  -4.50  -12.16%
+      5.0%     13     23.1% £  +4.50  +34.62%
+      8.0%      2     50.0% £  +4.00 +200.00%
+     10.0%      2     50.0% £  +4.00 +200.00%
+     12.0%      2     50.0% £  +4.00 +200.00%
+     15.0%      2     50.0% £  +4.00 +200.00%
+
+Stage C3c complete. Experiments above.
+PS C:\Users\LENOVO\Desktop\Personal Files\soccer_prediction> 
