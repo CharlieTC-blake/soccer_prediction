@@ -1,19 +1,20 @@
 """
 Streamlit app for the soccer prediction model.
-Predicts match outcome probabilities for a chosen home vs away team.
+Shows predictions for historical matchups AND today's live fixtures.
 """
 import os
 import pandas as pd
 import numpy as np
 import glob
+import requests
 import streamlit as st
 from sklearn.linear_model import LogisticRegression
+from datetime import datetime
 
-# ---------- Setup ----------
-st.set_page_config(page_title="Soccer Predictor", page_icon="⚽", layout="centered")
+st.set_page_config(page_title="Soccer Predictor", page_icon="⚽", layout="wide")
 
 
-# ---------- 1. Load data (cached so it only runs once) ----------
+# ---------- 1. Load historical data ----------
 @st.cache_data
 def load_and_prepare():
     base_dir = os.path.dirname(os.path.abspath(__file__))
@@ -102,7 +103,6 @@ def compute_features(matches):
     label_map = {'H': 0, 'D': 1, 'A': 2}
     matches['target'] = matches['FTR'].map(label_map)
 
-    # Build "current state" per team: final Elo and final form as of the last match
     final_elo = dict(elo)
     final_form = {t: team_form(t) for t in elo.keys()}
     final_rest = {t: (matches['Date'].max() - d).days
@@ -127,50 +127,109 @@ def train_model(matches):
 
 model, feature_cols = train_model(matches)
 
-# ---------- 4. Build the UI ----------
+
+# ---------- 4. Fetch today's fixtures from football-data.org ----------
+@st.cache_data(ttl=300)  # cache for 5 minutes
+def fetch_todays_fixtures():
+    try:
+        api_key = st.secrets["FOOTBALL_DATA_API_KEY"]
+    except Exception:
+        return None, "API key not configured. Add FOOTBALL_DATA_API_KEY to secrets."
+
+    url = "https://api.football-data.org/v4/matches"
+    headers = {"X-Auth-Token": api_key}
+    params = {"competitions": "PL", "dateFrom": datetime.now().strftime("%Y-%m-%d"),
+              "dateTo": datetime.now().strftime("%Y-%m-%d")}
+
+    try:
+        response = requests.get(url, headers=headers, params=params, timeout=10)
+        if response.status_code != 200:
+            return None, f"API error: {response.status_code}"
+        data = response.json()
+        return data.get("matches", []), None
+    except Exception as e:
+        return None, f"Network error: {e}"
+
+
+# ---------- 5. Build the UI ----------
 st.title("⚽ Soccer Match Predictor")
-st.write("Pick a home team and an away team to see the model's predicted probabilities.")
 
-teams = sorted(final_elo.keys())
-default_home = teams.index("Arsenal") if "Arsenal" in teams else 0
-default_away = teams.index("Man City") if "Man City" in teams else 1
-home_team = st.selectbox("Home team", teams, index=default_home)
-away_team = st.selectbox("Away team", teams, index=default_away)
+tab1, tab2 = st.tabs(["🔮 Custom Prediction", "📅 Today's Fixtures"])
 
-if home_team == away_team:
-    st.warning("Home and away teams must be different.")
-    st.stop()
+# ---------- Tab 1: Custom prediction ----------
+with tab1:
+    st.write("Pick a home team and an away team to see the model's predicted probabilities.")
 
-# ---------- 5. Compute features for the chosen matchup and predict ----------
-elo_diff = final_elo[home_team] - final_elo[away_team]
-form_diff = final_form[home_team] - final_form[away_team]
-rest_diff = final_rest[home_team] - final_rest[away_team]
+    teams = sorted(final_elo.keys())
+    default_home = teams.index("Arsenal") if "Arsenal" in teams else 0
+    default_away = teams.index("Man City") if "Man City" in teams else 1
+    home_team = st.selectbox("Home team", teams, index=default_home)
+    away_team = st.selectbox("Away team", teams, index=default_away)
 
-X = pd.DataFrame([[elo_diff, form_diff, rest_diff]], columns=feature_cols)
-proba = model.predict_proba(X)[0]
+    if home_team == away_team:
+        st.warning("Home and away teams must be different.")
+        st.stop()
 
-# ---------- 6. Display results ----------
-st.subheader(f"Prediction: {home_team} vs {away_team}")
+    elo_diff = final_elo[home_team] - final_elo[away_team]
+    form_diff = final_form[home_team] - final_form[away_team]
+    rest_diff = final_rest[home_team] - final_rest[away_team]
 
-col1, col2, col3 = st.columns(3)
-col1.metric("Home win", f"{proba[0]*100:.1f}%")
-col2.metric("Draw", f"{proba[1]*100:.1f}%")
-col3.metric("Away win", f"{proba[2]*100:.1f}%")
+    X = pd.DataFrame([[elo_diff, form_diff, rest_diff]], columns=feature_cols)
+    proba = model.predict_proba(X)[0]
 
-chart_data = pd.DataFrame({
-    'Outcome': ['Home win', 'Draw', 'Away win'],
-    'Probability': [proba[0], proba[1], proba[2]],
-})
-st.bar_chart(chart_data, x='Outcome', y='Probability', height=250)
+    st.subheader(f"Prediction: {home_team} vs {away_team}")
 
-with st.expander("Show features used by the model"):
-    st.write(f"Elo rating — {home_team}: {final_elo[home_team]:.0f}, {away_team}: {final_elo[away_team]:.0f}")
-    st.write(f"Recent form (points/game) — {home_team}: {final_form[home_team]:.2f}, {away_team}: {final_form[away_team]:.2f}")
-    st.write(f"Elo difference: {elo_diff:+.0f}")
-    st.write(f"Form difference: {form_diff:+.2f}")
-    st.write(f"Rest-days difference: {rest_diff:+.0f}")
+    col1, col2, col3 = st.columns(3)
+    col1.metric("Home win", f"{proba[0]*100:.1f}%")
+    col2.metric("Draw", f"{proba[1]*100:.1f}%")
+    col3.metric("Away win", f"{proba[2]*100:.1f}%")
 
-st.caption("⚠️ Predictions use each team's Elo and form as of the last match in the dataset "
-           "(May 2026). Not intended for betting advice.")
+    chart_data = pd.DataFrame({
+        'Outcome': ['Home win', 'Draw', 'Away win'],
+        'Probability': [proba[0], proba[1], proba[2]],
+    })
+    st.bar_chart(chart_data, x='Outcome', y='Probability', height=250)
 
-st.caption("Model and code: [github.com/CharlieTC-blake/soccer_prediction](https://github.com/CharlieTC-blake/soccer_prediction)")
+    with st.expander("Show features used by the model"):
+        st.write(f"Elo rating — {home_team}: {final_elo[home_team]:.0f}, {away_team}: {final_elo[away_team]:.0f}")
+        st.write(f"Recent form — {home_team}: {final_form[home_team]:.2f}, {away_team}: {final_form[away_team]:.2f}")
+        st.write(f"Elo difference: {elo_diff:+.0f}")
+        st.write(f"Form difference: {form_diff:+.2f}")
+        st.write(f"Rest-days difference: {rest_diff:+.0f}")
+
+# ---------- Tab 2: Today's fixtures ----------
+with tab2:
+    st.write("Predictions for today's Premier League fixtures, fetched live from football-data.org.")
+
+    fixtures, error = fetch_todays_fixtures()
+
+    if error:
+        st.warning(error)
+    elif not fixtures:
+        st.info("No Premier League fixtures today.")
+    else:
+        for match in fixtures:
+            home = match["homeTeam"]["name"]
+            away = match["awayTeam"]["name"]
+            status = match["status"]
+
+            # Only predict if both teams are in our model
+            if home in final_elo and away in final_elo:
+                elo_diff = final_elo[home] - final_elo[away]
+                form_diff = final_form[home] - final_form[away]
+                rest_diff = final_rest[home] - final_rest[away]
+                X = pd.DataFrame([[elo_diff, form_diff, rest_diff]], columns=feature_cols)
+                proba = model.predict_proba(X)[0]
+
+                st.subheader(f"{home} vs {away}")
+                st.caption(f"Status: {status}")
+                col1, col2, col3 = st.columns(3)
+                col1.metric("Home", f"{proba[0]*100:.1f}%")
+                col2.metric("Draw", f"{proba[1]*100:.1f}%")
+                col3.metric("Away", f"{proba[2]*100:.1f}%")
+            else:
+                st.subheader(f"{home} vs {away}")
+                st.caption(f"Status: {status} — prediction unavailable (one or both teams not in training data)")
+
+st.caption("⚠️ Predictions use each team's Elo and form as of the last match in the dataset. "
+           "Not intended for betting advice.")

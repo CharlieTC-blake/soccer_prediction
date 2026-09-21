@@ -7,3 +7,4 @@ results_summary.txt
 
 # Ignore VS Code settings
 .vscode/
+.streamlit/secrets.toml
