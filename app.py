@@ -2,6 +2,7 @@
 Streamlit app for the soccer prediction model.
 Predicts match outcome probabilities for a chosen home vs away team.
 """
+import os
 import pandas as pd
 import numpy as np
 import glob
@@ -11,14 +12,14 @@ from sklearn.linear_model import LogisticRegression
 # ---------- Setup ----------
 st.set_page_config(page_title="Soccer Predictor", page_icon="⚽", layout="centered")
 
+
 # ---------- 1. Load data (cached so it only runs once) ----------
 @st.cache_data
 def load_and_prepare():
+    base_dir = os.path.dirname(os.path.abspath(__file__))
+    data_dir = os.path.join(base_dir, 'data')
     frames = []
-    import os
-base_dir = os.path.dirname(os.path.abspath(__file__))
-data_dir = os.path.join(base_dir, 'data')
-for f in sorted(glob.glob(os.path.join(data_dir, 'season-*.csv'))):
+    for f in sorted(glob.glob(os.path.join(data_dir, 'season-*.csv'))):
         df = pd.read_csv(f)
         frames.append(df)
     matches = pd.concat(frames, ignore_index=True)
@@ -27,7 +28,9 @@ for f in sorted(glob.glob(os.path.join(data_dir, 'season-*.csv'))):
     matches = matches.dropna(subset=['FTHG', 'FTAG', 'FTR'])
     return matches
 
+
 matches = load_and_prepare()
+
 
 # ---------- 2. Compute walk-forward features ----------
 @st.cache_data
@@ -62,6 +65,7 @@ def compute_features(matches):
     matches['elo_diff'] = [he - ae for he, ae in zip(home_elo, away_elo)]
 
     team_history = {}
+
     def team_form(t, n=5):
         hist = team_history.get(t, [])
         if not hist:
@@ -98,15 +102,17 @@ def compute_features(matches):
     label_map = {'H': 0, 'D': 1, 'A': 2}
     matches['target'] = matches['FTR'].map(label_map)
 
-    # Build "current state" per team: final Elo and final form as of May 2023
-    final_elo = dict(elo)  # elo dict holds each team's last rating
+    # Build "current state" per team: final Elo and final form as of the last match
+    final_elo = dict(elo)
     final_form = {t: team_form(t) for t in elo.keys()}
     final_rest = {t: (matches['Date'].max() - d).days
                   for t, d in last_played.items()}
 
     return matches, final_elo, final_form, final_rest
 
+
 matches, final_elo, final_form, final_rest = compute_features(matches)
+
 
 # ---------- 3. Train the model ----------
 @st.cache_data
@@ -118,18 +124,19 @@ def train_model(matches):
     model.fit(train[feature_cols], train['target'])
     return model, feature_cols
 
+
 model, feature_cols = train_model(matches)
 
 # ---------- 4. Build the UI ----------
 st.title("⚽ Soccer Match Predictor")
 st.write("Pick a home team and an away team to see the model's predicted probabilities.")
 
-# Sort team names alphabetically
 teams = sorted(final_elo.keys())
-home_team = st.selectbox("Home team", teams, index=teams.index("Arsenal") if "Arsenal" in teams else 0)
-away_team = st.selectbox("Away team", teams, index=teams.index("Man City") if "Man City" in teams else 1)
+default_home = teams.index("Arsenal") if "Arsenal" in teams else 0
+default_away = teams.index("Man City") if "Man City" in teams else 1
+home_team = st.selectbox("Home team", teams, index=default_home)
+away_team = st.selectbox("Away team", teams, index=default_away)
 
-# Prevent picking the same team twice
 if home_team == away_team:
     st.warning("Home and away teams must be different.")
     st.stop()
@@ -150,14 +157,12 @@ col1.metric("Home win", f"{proba[0]*100:.1f}%")
 col2.metric("Draw", f"{proba[1]*100:.1f}%")
 col3.metric("Away win", f"{proba[2]*100:.1f}%")
 
-# A small bar chart
 chart_data = pd.DataFrame({
     'Outcome': ['Home win', 'Draw', 'Away win'],
     'Probability': [proba[0], proba[1], proba[2]],
 })
 st.bar_chart(chart_data, x='Outcome', y='Probability', height=250)
 
-# Show the underlying features
 with st.expander("Show features used by the model"):
     st.write(f"Elo rating — {home_team}: {final_elo[home_team]:.0f}, {away_team}: {final_elo[away_team]:.0f}")
     st.write(f"Recent form (points/game) — {home_team}: {final_form[home_team]:.2f}, {away_team}: {final_form[away_team]:.2f}")
@@ -166,6 +171,6 @@ with st.expander("Show features used by the model"):
     st.write(f"Rest-days difference: {rest_diff:+.0f}")
 
 st.caption("⚠️ Predictions use each team's Elo and form as of the last match in the dataset "
-           "(May 2023). Not intended for betting advice.")
+           "(May 2026). Not intended for betting advice.")
 
 st.caption("Model and code: [github.com/CharlieTC-blake/soccer_prediction](https://github.com/CharlieTC-blake/soccer_prediction)")
