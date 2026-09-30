@@ -37,3 +37,23 @@ class StackedPredictor:
         x_meta = np.concatenate([lr, dc, base]).reshape(1, -1)
         stacked = self.meta_model.predict_proba(x_meta)[0]
         return float(stacked[0]), float(stacked[1]), float(stacked[2])
+
+    def predict_extra_markets(self, home_team, away_team):
+        """
+        Return extra market probabilities from the Dixon-Coles model.
+        Returns dict or None on failure.
+
+        These are informational. Historical testing showed no edge over
+        the base rate on public data.
+        """
+        try:
+            p = self.dc_model.predict(home_team, away_team)
+            under, push, over = p.totals(2.5)
+            return {
+                'over_2_5': float(over),
+                'under_2_5': float(under),
+                'btts_yes': float(p.btts_yes),
+                'btts_no': float(p.btts_no),
+            }
+        except Exception:
+            return None
