@@ -20,17 +20,12 @@ def compute_double_chance_probs(p_home, p_draw, p_away):
 
 
 def compute_ev_ugx(model_p, odds, stake_ugx):
-    """
-    Expected Value in UGX for a single bet.
-    Returns None if odds are missing or invalid.
-    """
     if odds is None or odds <= 1.0 or stake_ugx <= 0:
         return None
     return stake_ugx * (model_p * odds - 1.0)
 
 
 def fair_odds(prob):
-    """Fair decimal odds for a probability (no bookmaker margin)."""
     if prob <= 0:
         return float('inf')
     return 1.0 / prob
@@ -39,9 +34,6 @@ def fair_odds(prob):
 def generate_recommendations(home_team, away_team, p_home, p_draw, p_away,
                              odds_home=None, odds_draw=None, odds_away=None,
                              stake_ugx=DEFAULT_STAKE_UGX):
-    """
-    Generate three ranked recommendations from model probabilities.
-    """
     outcomes = [
         {'label': f'{home_team} to win', 'short': 'H',
          'prob': p_home, 'odds': odds_home},
@@ -85,15 +77,72 @@ def generate_recommendations(home_team, away_team, p_home, p_draw, p_away,
     }
 
 
-def get_head_to_head(matches_df, home_team, away_team, n=5):
+def rank_all_markets(p_home, p_draw, p_away, extra_markets,
+                     home_team, away_team, odds_home=None,
+                     odds_draw=None, odds_away=None, stake_ugx=1000):
     """
-    Return the last n meetings between home_team and away_team,
-    most recent first.
+    Rank all available market outcomes by model confidence.
 
-    Returns:
-      rows: list of dicts with date, home, away, home_goals, away_goals, result
-      summary: dict with counts and averages
+    Parameters:
+      p_home, p_draw, p_away: 1X2 probabilities from the stacked model
+      extra_markets: dict with keys 'over_2_5', 'under_2_5', 'btts_yes',
+                     'btts_no' (or None if unavailable)
+      home_team, away_team: display names
+      odds_home, odds_draw, odds_away: optional bookmaker odds for 1X2
+      stake_ugx: stake for EV computation
+
+    Returns dict with 'singles', 'double_chances', 'all'.
     """
+    def make_entry(label, prob, market, odds=None):
+        entry = {
+            'label': label,
+            'prob': float(prob),
+            'market': market,
+            'fair_odds': (1.0 / prob) if prob > 0 else float('inf'),
+            'odds': odds,
+        }
+        if odds is not None and odds > 1.0:
+            entry['ev_ugx'] = stake_ugx * (prob * odds - 1.0)
+        else:
+            entry['ev_ugx'] = None
+        return entry
+
+    singles = [
+        make_entry(f'{home_team} to win', p_home, '1X2', odds_home),
+        make_entry('Draw', p_draw, '1X2', odds_draw),
+        make_entry(f'{away_team} to win', p_away, '1X2', odds_away),
+    ]
+
+    if extra_markets:
+        singles.append(make_entry('Over 2.5 goals',
+                                   extra_markets['over_2_5'], 'O/U'))
+        singles.append(make_entry('Under 2.5 goals',
+                                   extra_markets['under_2_5'], 'O/U'))
+        singles.append(make_entry('BTTS Yes',
+                                   extra_markets['btts_yes'], 'BTTS'))
+        singles.append(make_entry('BTTS No',
+                                   extra_markets['btts_no'], 'BTTS'))
+
+    singles.sort(key=lambda x: x['prob'], reverse=True)
+
+    double_chances = [
+        make_entry(f'{home_team} or Draw', p_home + p_draw, 'DC'),
+        make_entry(f'{home_team} or {away_team}', p_home + p_away, 'DC'),
+        make_entry(f'Draw or {away_team}', p_draw + p_away, 'DC'),
+    ]
+    double_chances.sort(key=lambda x: x['prob'], reverse=True)
+
+    all_outcomes = singles + double_chances
+    all_outcomes.sort(key=lambda x: x['prob'], reverse=True)
+
+    return {
+        'singles': singles,
+        'double_chances': double_chances,
+        'all': all_outcomes,
+    }
+
+
+def get_head_to_head(matches_df, home_team, away_team, n=5):
     mask = (
         ((matches_df['HomeTeam'] == home_team) & (matches_df['AwayTeam'] == away_team)) |
         ((matches_df['HomeTeam'] == away_team) & (matches_df['AwayTeam'] == home_team))

@@ -1,11 +1,7 @@
 ﻿"""
 Streamlit app for the soccer prediction model.
 
-Uses the stacked model: LR + Dixon-Coles + base rates → meta-model.
-
-Tabs:
-  1. Fixtures by Date — historical and upcoming fixtures with accuracy
-  2. Match Analyser — model probabilities, H2H, odds input, recommendations
+Uses the stacked model: LR + Dixon-Coles + base rates -> meta-model.
 """
 import os
 import pandas as pd
@@ -21,13 +17,13 @@ from soccer_pipeline import (
 )
 from match_analyser import (
     generate_recommendations, get_head_to_head, DEFAULT_STAKE_UGX,
+    rank_all_markets,
 )
 from stacked_predictor import StackedPredictor
 
 st.set_page_config(page_title="Soccer Predictor", page_icon="⚽", layout="wide")
 
 
-# ---------- Load ----------
 @st.cache_data
 def load_data():
     base_dir = os.path.dirname(os.path.abspath(__file__))
@@ -57,7 +53,6 @@ matches, final_state = compute_features_cached(matches)
 stacked = load_stacked_model()
 
 
-# ---------- Team names ----------
 TEAM_NAME_MAP = {
     "Manchester City FC": "Man City", "Manchester City": "Man City",
     "Manchester United FC": "Man United", "Manchester United": "Man United",
@@ -95,7 +90,6 @@ def translate_team(api_name):
     return TEAM_NAME_MAP.get(api_name, api_name)
 
 
-# ---------- Fixtures ----------
 @st.cache_data(ttl=3600)
 def fetch_fixtures_for_date(date_str):
     date_obj = datetime.strptime(date_str, "%Y-%m-%d").date()
@@ -172,7 +166,6 @@ def fetch_upcoming_fixtures(days_ahead=21):
     return upcoming[:10]
 
 
-# ---------- Prediction helpers ----------
 def build_feature_dict(home_key, away_key, match_date=None):
     if match_date is None:
         match_date = datetime.now().date()
@@ -200,7 +193,6 @@ def build_feature_dict(home_key, away_key, match_date=None):
 
 
 def predict(home_key, away_key, match_date):
-    """Stacked prediction. Returns (p_home, p_draw, p_away) or None."""
     if home_key not in final_state['elo'] or away_key not in final_state['elo']:
         return None
     feats = build_feature_dict(home_key, away_key, match_date)
@@ -227,7 +219,7 @@ def render_match_analysis(home_raw, away_raw, home_key, away_key,
                           match_date, stake_ugx, date_str, key_suffix):
     result = predict(home_key, away_key, match_date)
     if result is None:
-        st.warning(f"Prediction unavailable — one or both teams "
+        st.warning(f"Prediction unavailable - one or both teams "
                    f"not in training data ({home_key}, {away_key}).")
         return
 
@@ -239,7 +231,6 @@ def render_match_analysis(home_raw, away_raw, home_key, away_key,
     c2.metric("Draw", f"{p_draw*100:.1f}%")
     c3.metric("Away win", f"{p_away*100:.1f}%")
 
-    # Head-to-head
     st.markdown("**Head-to-Head (last 5 meetings)**")
     h2h_rows, h2h_summary = get_head_to_head(matches, home_key, away_key, n=5)
     if not h2h_rows:
@@ -282,48 +273,74 @@ def render_match_analysis(home_raw, away_raw, home_key, away_key,
         )
 
     if hist_oh is None:
-        st.caption("⚠️ No historical odds for this match — "
+        st.caption("No historical odds for this match - "
                    "enter your bookmaker's current prices above.")
 
-    recs = generate_recommendations(
-        home_raw, away_raw, p_home, p_draw, p_away,
+    extra = stacked.predict_extra_markets(home_key, away_key)
+
+    ranking = rank_all_markets(
+        p_home, p_draw, p_away, extra,
+        home_raw, away_raw,
         odds_home=oh, odds_draw=od, odds_away=oa,
         stake_ugx=stake_ugx,
     )
 
-    st.markdown(f"**Recommendations for a stake of UGX {stake_ugx:,}**")
+    st.markdown("**Ranked recommendations**")
+    st.caption("Ranked by model confidence. Double chances are combined "
+               "outcomes (naturally higher probability). Fair odds = the "
+               "break-even price you would need to make the bet +EV.")
 
-    tp = recs['top_pick']
-    st.markdown(f"**🥇 Top pick: {tp['label']}**")
-    st.write(f"Model probability: **{tp['prob']*100:.1f}%**")
-    st.write(f"Fair odds (break-even): **{tp['fair_odds']:.2f}**")
-    if tp['ev_ugx'] is not None:
-        ev_colour = "🟢" if tp['ev_ugx'] > 0 else "🔴"
-        st.write(f"{ev_colour} Expected Value: **UGX {tp['ev_ugx']:+,.0f}**")
-    st.divider()
+    st.markdown("**Top single outcomes:**")
+    for i, entry in enumerate(ranking['singles'][:5], 1):
+        ev_str = ""
+        if entry['ev_ugx'] is not None:
+            colour = "GREEN" if entry['ev_ugx'] > 0 else "RED"
+            ev_str = f"  [{colour}] EV: UGX {entry['ev_ugx']:+,.0f}"
+        st.write(f"{i}. **{entry['label']}** — "
+                 f"{entry['prob']*100:.1f}%  "
+                 f"*(fair odds {entry['fair_odds']:.2f})*{ev_str}")
 
-    tdc = recs['top_double_chance']
-    st.markdown(f"**🥈 Top double chance: {tdc['label']}**")
-    st.write(f"Combined probability: **{tdc['prob']*100:.1f}%**")
-    st.write(f"Fair odds (break-even): **{tdc['fair_odds']:.2f}**")
-    st.divider()
+    st.markdown("**Top double chances:**")
+    for i, entry in enumerate(ranking['double_chances'][:3], 1):
+        st.write(f"{i}. **{entry['label']}** — "
+                 f"{entry['prob']*100:.1f}%  "
+                 f"*(fair odds {entry['fair_odds']:.2f})*")
 
-    av = recs['avoid']
-    st.markdown(f"**🚫 Avoid: {av['label']}** "
-                f"({av['prob']*100:.1f}% model probability)")
+    with st.expander("Show all outcomes"):
+        all_df = pd.DataFrame(ranking['all'])
+        all_df['prob_pct'] = (all_df['prob'] * 100).round(1)
+        all_df['fair_odds_r'] = all_df['fair_odds'].round(2)
+        all_df['ev_display'] = all_df['ev_ugx'].apply(
+            lambda x: f"UGX {x:+,.0f}" if x is not None else "—"
+        )
+        display_df = all_df[['label', 'market', 'prob_pct',
+                              'fair_odds_r', 'ev_display']].rename(
+            columns={
+                'label': 'Outcome',
+                'market': 'Market',
+                'prob_pct': 'Probability (%)',
+                'fair_odds_r': 'Fair Odds',
+                'ev_display': 'EV (UGX)',
+            }
+        )
+        st.dataframe(display_df, use_container_width=True, hide_index=True)
 
-    st.caption("⚠️ Recommendations are model-derived. "
-               "Not financial advice. Bet only what you can afford to lose.")
+    if extra is None:
+        st.caption("Note: O/U and BTTS unavailable for this match "
+                   "(unknown team). Ranked list shows 1X2 and DC only.")
+
+    st.caption("Recommendations are model-derived. "
+               "Historical testing showed no edge on O/U and BTTS over the "
+               "base rate. Not financial advice. Bet only what you can "
+               "afford to lose.")
 
 
-# ---------- UI ----------
-st.title("⚽ Soccer Match Predictor")
+st.title("Soccer Match Predictor")
 st.caption("Model: stacked (Logistic Regression + Dixon-Coles + base rates)")
 
-tab1, tab2 = st.tabs(["🗓️ Fixtures by Date", "📊 Match Analyser"])
+tab1, tab2 = st.tabs(["Fixtures by Date", "Match Analyser"])
 
 
-# ============ Tab 1: Fixtures by Date ============
 with tab1:
     st.write("Pick any date to see Premier League fixtures and predictions.")
     st.caption("Past matches show final scores and prediction accuracy.")
@@ -358,7 +375,7 @@ with tab1:
     st.session_state.selected_date = selected_date
     date_str = selected_date.strftime("%Y-%m-%d")
     full_date = selected_date.strftime(f"{selected_date.strftime('%A')}, %d %B %Y")
-    st.subheader(f"📅 {full_date}")
+    st.subheader(f"{full_date}")
 
     fixtures, error = fetch_fixtures_for_date(date_str)
     if error:
@@ -386,7 +403,7 @@ with tab1:
                 pred_idx = int(np.argmax(proba))
                 pred_label = ["Home win", "Draw", "Away win"][pred_idx]
 
-                st.markdown(f"**{home_raw} vs {away_raw}** — {status_long}")
+                st.markdown(f"**{home_raw} vs {away_raw}** - {status_long}")
                 c1, c2, c3 = st.columns(3)
                 c1.metric("Home", f"{p_home*100:.1f}%")
                 c2.metric("Draw", f"{p_draw*100:.1f}%")
@@ -404,15 +421,15 @@ with tab1:
                     if correct:
                         correct_count += 1
                     scored_count += 1
-                    badge = "✅ Correct" if correct else "❌ Incorrect"
-                    st.caption(f"Final score: {home_goals}–{away_goals} — "
+                    badge = "CORRECT" if correct else "INCORRECT"
+                    st.caption(f"Final score: {home_goals}-{away_goals} - "
                                f"{actual_label}. Prediction: {pred_label}. {badge}")
                 st.divider()
             else:
-                st.markdown(f"**{home_raw} vs {away_raw}** — {status_long}")
+                st.markdown(f"**{home_raw} vs {away_raw}** - {status_long}")
                 missing = [t for k, t in [(home_key, home_raw), (away_key, away_raw)]
                            if k not in final_state['elo']]
-                st.caption(f"Prediction unavailable — {', '.join(missing)} "
+                st.caption(f"Prediction unavailable - {', '.join(missing)} "
                            f"not in training data.")
 
         if scored_count > 0:
@@ -421,9 +438,8 @@ with tab1:
                     f"({100*correct_count/scored_count:.0f}%)")
 
 
-# ============ Tab 2: Match Analyser ============
 with tab2:
-    st.write("Model probabilities, head-to-head context, and betting recommendations.")
+    st.write("Model probabilities, head-to-head context, and ranked recommendations.")
     st.caption("Model-derived recommendations. Not financial advice.")
 
     stake_col, _ = st.columns([1, 3])
@@ -443,7 +459,7 @@ with tab2:
     )
 
     if mode == "Upcoming fixtures (next 21 days)":
-        st.subheader("📅 Upcoming fixtures")
+        st.subheader("Upcoming fixtures")
         upcoming = fetch_upcoming_fixtures(days_ahead=21)
         if not upcoming:
             st.info("No upcoming fixtures found in the next 3 weeks.")
@@ -454,7 +470,7 @@ with tab2:
                 home_key = translate_team(fx["home"])
                 away_key = translate_team(fx["away"])
                 date_display = fx["date"].strftime("%A, %d %B %Y")
-                label = (f"**{fx['home']}** vs **{fx['away']}** — "
+                label = (f"**{fx['home']}** vs **{fx['away']}** - "
                          f"{date_display} {fx.get('time', '')}")
                 with st.expander(label, expanded=False):
                     render_match_analysis(
@@ -478,7 +494,7 @@ with tab2:
 
         date_str = analyser_date.strftime("%Y-%m-%d")
         full_date = analyser_date.strftime(f"{analyser_date.strftime('%A')}, %d %B %Y")
-        st.subheader(f"📅 {full_date}")
+        st.subheader(f"{full_date}")
 
         fixtures, error = fetch_fixtures_for_date(date_str)
         if error:
@@ -501,9 +517,9 @@ with tab2:
 
                 score_str = ""
                 if home_goals is not None and away_goals is not None:
-                    score_str = f" — Final: {home_goals}–{away_goals}"
+                    score_str = f" - Final: {home_goals}-{away_goals}"
 
-                label = f"**{home_raw}** vs **{away_raw}** — {status_long}{score_str}"
+                label = f"**{home_raw}** vs **{away_raw}** - {status_long}{score_str}"
 
                 with st.expander(label, expanded=False):
                     render_match_analysis(
@@ -514,7 +530,7 @@ with tab2:
                     )
 
 
-st.caption("⚠️ Predictions use each team's Elo and form as of the last match "
+st.caption("Predictions use each team's Elo and form as of the last match "
            "in the dataset. Not intended for betting advice.")
 st.caption("Model and code: [github.com/CharlieTC-blake/soccer_prediction]"
            "(https://github.com/CharlieTC-blake/soccer_prediction)")
