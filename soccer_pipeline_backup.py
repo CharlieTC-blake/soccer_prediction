@@ -1,4 +1,4 @@
-﻿"""
+"""
 Soccer match outcome prediction pipeline.
 
 Features:
@@ -7,7 +7,8 @@ Features:
   - Non-linear rest quality difference
   - Rolling goals scored / conceded (last 5) difference
   - Head-to-head points (last 3 meetings) from home perspective
-  - NEW: Rolling xG created / conceded (last 5) difference
+
+Training uses exponential decay sample weights (concept-drift mitigation).
 """
 import pandas as pd
 import numpy as np
@@ -27,12 +28,18 @@ FEATURE_COLS = [
     'goals_scored_diff',
     'goals_conceded_diff',
     'h2h_home_points_L3',
-    'xg_created_diff',
-    'xg_conceded_diff',
 ]
 
 
 def rest_quality(days):
+    """
+    Non-linear rest quality score in [0, 1].
+
+    - < 3 days: fatigue penalty
+    - 4-6 days: optimal (1.0)
+    - 7-10 days: slight rust
+    - > 10 days: significant rust (floor 0.5)
+    """
     if days is None or pd.isna(days):
         return 0.7
     if days < 3:
@@ -45,13 +52,18 @@ def rest_quality(days):
 
 
 def compute_features(matches_df):
+    """
+    Walk-forward feature engineering.
+
+    Returns (matches_df, final_state) where final_state contains the
+    most recent state of every team for predicting future fixtures.
+    """
     elo = {}
     K = 20
     HOME_ADV = 60
 
     team_history = {}
     team_goals = {}
-    team_xg = {}
     last_played = {}
     h2h_history = {}
 
@@ -61,9 +73,6 @@ def compute_features(matches_df):
         'away_goals_scored_L5', 'away_goals_conceded_L5',
         'goals_scored_diff', 'goals_conceded_diff',
         'h2h_home_points_L3',
-        'home_xg_created_L5', 'home_xg_conceded_L5',
-        'away_xg_created_L5', 'away_xg_conceded_L5',
-        'xg_created_diff', 'xg_conceded_diff',
     ]}
 
     def get_elo(t):
@@ -85,20 +94,10 @@ def compute_features(matches_df):
         return (float(np.mean([h[1] for h in recent])),
                 float(np.mean([h[2] for h in recent])))
 
-    def rolling_xg(team, n=10):
-        hist = team_xg.get(team, [])
-        if not hist:
-            return 1.2, 1.2
-        recent = hist[-n:]
-        return (float(np.mean([h[1] for h in recent])),
-                float(np.mean([h[2] for h in recent])))
-
     for _, row in matches_df.iterrows():
         h, a, d = row['HomeTeam'], row['AwayTeam'], row['Date']
         ftr = row['FTR']
         fthg, ftag = row['FTHG'], row['FTAG']
-        home_xg = row.get('home_xg', np.nan)
-        away_xg = row.get('away_xg', np.nan)
 
         r_h, r_a = get_elo(h), get_elo(a)
         cols['elo_diff'].append(r_h - r_a)
@@ -121,15 +120,6 @@ def compute_features(matches_df):
         cols['goals_scored_diff'].append(hgs - ags)
         cols['goals_conceded_diff'].append(hgc - agc)
 
-        hxc, hxcn = rolling_xg(h)
-        axc, axcn = rolling_xg(a)
-        cols['home_xg_created_L5'].append(hxc)
-        cols['home_xg_conceded_L5'].append(hxcn)
-        cols['away_xg_created_L5'].append(axc)
-        cols['away_xg_conceded_L5'].append(axcn)
-        cols['xg_created_diff'].append(hxc - axc)
-        cols['xg_conceded_diff'].append(hxcn - axcn)
-
         h_rest = (d - last_played[h]).days if h in last_played else None
         a_rest = (d - last_played[a]).days if a in last_played else None
         cols['rest_quality_diff'].append(rest_quality(h_rest) -
@@ -148,10 +138,6 @@ def compute_features(matches_df):
         team_goals.setdefault(h, []).append((d, fthg, ftag))
         team_goals.setdefault(a, []).append((d, ftag, fthg))
 
-        if pd.notna(home_xg) and pd.notna(away_xg):
-            team_xg.setdefault(h, []).append((d, home_xg, away_xg))
-            team_xg.setdefault(a, []).append((d, away_xg, home_xg))
-
         h2h_history.setdefault((h, a), []).append(ph)
         h2h_history.setdefault((a, h), []).append(pa)
 
@@ -168,7 +154,6 @@ def compute_features(matches_df):
         'form': {t: (rolling_avg(hist, 5) if rolling_avg(hist, 5) is not None else 1.0)
                  for t, hist in team_history.items()},
         'goals': {t: rolling_goals(t) for t in team_goals.keys()},
-        'xg': {t: rolling_xg(t) for t in team_xg.keys()},
         'last_played': dict(last_played),
         'h2h': {k: (float(np.mean(v[-3:])) if v else 1.0)
                 for k, v in h2h_history.items()},
@@ -179,6 +164,7 @@ def compute_features(matches_df):
 
 
 def compute_sample_weights(dates, reference_date, half_life_years=HALF_LIFE_YEARS):
+    """Exponential decay weight: 0.5 ** (age_years / half_life_years)."""
     ages_years = (reference_date - dates).dt.days / 365.25
     return 0.5 ** (ages_years / half_life_years)
 
@@ -188,7 +174,7 @@ def load_matches():
     for f in sorted(glob.glob('data/season-*.csv')):
         frames.append(pd.read_csv(f))
     df = pd.concat(frames, ignore_index=True)
-    df['Date'] = pd.to_datetime(df['Date'], format='ISO8601')
+    df['Date'] = pd.to_datetime(df['Date'], format='%d/%m/%Y')
     df = df.sort_values('Date').reset_index(drop=True)
     df = df.dropna(subset=['FTHG', 'FTAG', 'FTR'])
     return df
