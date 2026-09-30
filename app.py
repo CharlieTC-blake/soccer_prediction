@@ -4,7 +4,7 @@ Streamlit app for the soccer prediction model.
 Tabs:
   1. Next Fixtures — upcoming fixtures with expandable predictions
   2. Fixtures by Date — historical and upcoming fixtures with accuracy
-  3. Match Analyser — model-driven recommendations with UGX stake and EV
+  3. Match Analyser — model-driven recommendations with UGX stake, EV, and H2H
 """
 import os
 import pandas as pd
@@ -24,7 +24,7 @@ from odds_utils import (
 )
 from match_analyser import (
     generate_recommendations, compute_ev_ugx, fair_odds,
-    DEFAULT_STAKE_UGX,
+    get_head_to_head, DEFAULT_STAKE_UGX,
 )
 
 st.set_page_config(page_title="Soccer Predictor", page_icon="⚽", layout="wide")
@@ -207,7 +207,6 @@ def build_feature_dict(home_key, away_key, match_date=None):
 
 
 def predict(home_key, away_key, match_date):
-    """Returns (p_home, p_draw, p_away) or None if team unknown."""
     if home_key not in final_state['elo'] or away_key not in final_state['elo']:
         return None
     feats = build_feature_dict(home_key, away_key, match_date)
@@ -217,7 +216,6 @@ def predict(home_key, away_key, match_date):
 
 
 def get_odds_from_data(home_key, away_key, match_date):
-    """Look up historical Bet365 odds for a specific match."""
     mask = ((matches['Date'].dt.date == match_date) &
             (matches['HomeTeam'] == home_key) &
             (matches['AwayTeam'] == away_key))
@@ -294,10 +292,6 @@ with tab1:
                     continue
 
                 st.caption(f"Bookmaker overround: {overround*100:.2f}%")
-                st.caption(f"Fair probabilities — "
-                           f"Home {book_probs[0]*100:.1f}% | "
-                           f"Draw {book_probs[1]*100:.1f}% | "
-                           f"Away {book_probs[2]*100:.1f}%")
 
                 evs = compute_ev([p_home, p_draw, p_away], odds)
                 st.markdown("**Expected Value per £1 stake**")
@@ -415,7 +409,6 @@ with tab3:
     st.caption("Recommendations are derived from the model, not the bookmaker. "
                "Not financial advice.")
 
-    # Global stake input
     stake_col, _ = st.columns([1, 3])
     with stake_col:
         stake_ugx = st.number_input(
@@ -425,7 +418,6 @@ with tab3:
             key="analyser_stake",
         )
 
-    # Date picker
     if "analyser_date" not in st.session_state:
         st.session_state.analyser_date = datetime(2025, 9, 27).date()
 
@@ -477,16 +469,40 @@ with tab3:
 
                 p_home, p_draw, p_away = result
 
-                # Try to find historical odds
-                hist_oh, hist_od, hist_oa = get_odds_from_data(
-                    home_key, away_key, analyser_date
-                )
-
+                # ---------- Model probabilities ----------
                 st.markdown("**Model probabilities**")
                 c1, c2, c3 = st.columns(3)
                 c1.metric("Home win", f"{p_home*100:.1f}%")
                 c2.metric("Draw", f"{p_draw*100:.1f}%")
                 c3.metric("Away win", f"{p_away*100:.1f}%")
+
+                # ---------- Head-to-Head ----------
+                st.markdown("**Head-to-Head (last 5 meetings)**")
+                h2h_rows, h2h_summary = get_head_to_head(
+                    matches, home_key, away_key, n=5
+                )
+                if not h2h_rows:
+                    st.caption("No previous meetings in the dataset.")
+                else:
+                    h2h_df = pd.DataFrame(h2h_rows)
+                    h2h_df.columns = ['Date', 'Home', 'Away', 'Home G', 'Away G', 'Result']
+                    st.dataframe(h2h_df, use_container_width=True, hide_index=True)
+
+                    h2h_feature = final_state['h2h'].get((home_key, away_key), 1.0)
+                    st.caption(
+                        f"Summary: {h2h_summary['home_wins']} {home_raw} wins, "
+                        f"{h2h_summary['draws']} draws, "
+                        f"{h2h_summary['away_wins']} {away_raw} wins. "
+                        f"Average total goals: {h2h_summary['avg_total_goals']:.1f}. "
+                        f"Model H2H feature (home perspective): {h2h_feature:.2f} "
+                        f"(neutral = 1.00)."
+                    )
+                st.divider()
+
+                # ---------- Odds input ----------
+                hist_oh, hist_od, hist_oa = get_odds_from_data(
+                    home_key, away_key, analyser_date
+                )
 
                 st.markdown("**Bookmaker odds** *(edit to try different prices)*")
                 key_suffix = f"ma_{date_str}_{home_key}_{away_key}"
@@ -514,7 +530,7 @@ with tab3:
                     st.caption("⚠️ No historical odds for this match — "
                                "enter your bookmaker's current prices above.")
 
-                # Generate recommendations
+                # ---------- Recommendations ----------
                 recs = generate_recommendations(
                     home_raw, away_raw, p_home, p_draw, p_away,
                     odds_home=oh, odds_draw=od, odds_away=oa,
@@ -523,7 +539,6 @@ with tab3:
 
                 st.markdown(f"**Recommendations for a stake of UGX {stake_ugx:,}**")
 
-                # Top pick
                 tp = recs['top_pick']
                 st.markdown(f"**🥇 Top pick: {tp['label']}**")
                 st.write(f"Model probability: **{tp['prob']*100:.1f}%**")
@@ -536,14 +551,12 @@ with tab3:
                                    "the model's probability suggests.")
                 st.divider()
 
-                # Top double chance
                 tdc = recs['top_double_chance']
                 st.markdown(f"**🥈 Top double chance: {tdc['label']}**")
                 st.write(f"Combined probability: **{tdc['prob']*100:.1f}%**")
                 st.write(f"Fair odds (break-even): **{tdc['fair_odds']:.2f}**")
                 st.divider()
 
-                # Avoid
                 av = recs['avoid']
                 st.markdown(f"**🚫 Avoid: {av['label']}** "
                             f"({av['prob']*100:.1f}% model probability)")

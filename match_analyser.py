@@ -22,7 +22,6 @@ def compute_double_chance_probs(p_home, p_draw, p_away):
 def compute_ev_ugx(model_p, odds, stake_ugx):
     """
     Expected Value in UGX for a single bet.
-
     Returns None if odds are missing or invalid.
     """
     if odds is None or odds <= 1.0 or stake_ugx <= 0:
@@ -84,6 +83,71 @@ def generate_recommendations(home_team, away_team, p_home, p_draw, p_away,
         'all_outcomes': outcomes_sorted,
         'double_chances': dc_sorted,
     }
+
+
+def get_head_to_head(matches_df, home_team, away_team, n=5):
+    """
+    Return the last n meetings between home_team and away_team,
+    most recent first.
+
+    Returns:
+      rows: list of dicts with date, home, away, home_goals, away_goals, result
+      summary: dict with counts and averages
+    """
+    mask = (
+        ((matches_df['HomeTeam'] == home_team) & (matches_df['AwayTeam'] == away_team)) |
+        ((matches_df['HomeTeam'] == away_team) & (matches_df['AwayTeam'] == home_team))
+    )
+    meetings = matches_df[mask].sort_values('Date', ascending=False).head(n)
+
+    if len(meetings) == 0:
+        return [], {}
+
+    rows = []
+    home_wins = 0
+    away_wins = 0
+    draws = 0
+    total_goals = 0
+
+    for _, m in meetings.iterrows():
+        h, a = m['HomeTeam'], m['AwayTeam']
+        hg, ag = int(m['FTHG']), int(m['FTAG'])
+        total_goals += hg + ag
+
+        if hg > ag:
+            winner = h
+        elif hg == ag:
+            winner = None
+        else:
+            winner = a
+
+        if winner == home_team:
+            home_wins += 1
+            label = f"{home_team} win"
+        elif winner == away_team:
+            away_wins += 1
+            label = f"{away_team} win"
+        else:
+            draws += 1
+            label = "Draw"
+
+        rows.append({
+            'date': m['Date'].strftime('%Y-%m-%d'),
+            'home': h,
+            'away': a,
+            'home_goals': hg,
+            'away_goals': ag,
+            'result': label,
+        })
+
+    summary = {
+        'matches': len(meetings),
+        'home_wins': home_wins,
+        'away_wins': away_wins,
+        'draws': draws,
+        'avg_total_goals': total_goals / len(meetings),
+    }
+    return rows, summary
 
 
 def format_recommendation_block(home_team, away_team, recommendations):
