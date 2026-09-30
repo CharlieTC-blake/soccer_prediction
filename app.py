@@ -257,7 +257,7 @@ def render_match_analysis(home_raw, away_raw, home_key, away_key,
     else:
         h2h_df = pd.DataFrame(h2h_rows)
         h2h_df.columns = ['Date', 'Home', 'Away', 'Home G', 'Away G', 'Result']
-        st.dataframe(h2h_df, use_container_width=True, hide_index=True)
+        st.dataframe(h2h_df, width='stretch', hide_index=True)
         h2h_feature = final_state['h2h'].get((home_key, away_key), 1.0)
         st.caption(
             f"Summary: {h2h_summary['home_wins']} {home_raw} wins, "
