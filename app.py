@@ -1,10 +1,11 @@
 ﻿"""
 Streamlit app for the soccer prediction model.
 
+Uses the stacked model: LR + Dixon-Coles + base rates → meta-model.
+
 Tabs:
-  1. Fixtures by Date — historical and upcoming fixtures with accuracy tracking
-  2. Match Analyser — model probabilities, H2H, odds input, and recommendations
-     (defaults to upcoming fixtures; can also show a specific date)
+  1. Fixtures by Date — historical and upcoming fixtures with accuracy
+  2. Match Analyser — model probabilities, H2H, odds input, recommendations
 """
 import os
 import pandas as pd
@@ -12,7 +13,6 @@ import numpy as np
 import glob
 import requests
 import streamlit as st
-from sklearn.linear_model import LogisticRegression
 from datetime import datetime, timedelta
 
 from soccer_pipeline import (
@@ -22,6 +22,7 @@ from soccer_pipeline import (
 from match_analyser import (
     generate_recommendations, get_head_to_head, DEFAULT_STAKE_UGX,
 )
+from stacked_predictor import StackedPredictor
 
 st.set_page_config(page_title="Soccer Predictor", page_icon="⚽", layout="wide")
 
@@ -46,18 +47,14 @@ def compute_features_cached(matches_df):
     return compute_features(matches_df)
 
 
-@st.cache_data
-def train_model(matches_df):
-    train = matches_df[matches_df['Date'] < SPLIT_DATE].copy()
-    weights = compute_sample_weights(train['Date'], reference_date=SPLIT_DATE)
-    model = LogisticRegression(max_iter=2000, random_state=42)
-    model.fit(train[FEATURE_COLS], train['target'], sample_weight=weights)
-    return model
+@st.cache_resource
+def load_stacked_model():
+    return StackedPredictor()
 
 
 matches = load_data()
 matches, final_state = compute_features_cached(matches)
-model = train_model(matches)
+stacked = load_stacked_model()
 
 
 # ---------- Team names ----------
@@ -170,12 +167,9 @@ def fetch_upcoming_fixtures(days_ahead=21):
                     "home": m.get("team1", ""),
                     "away": m.get("team2", ""),
                     "time": m.get("time", ""),
-                    "status": "SCHEDULED",
-                    "home_goals": None,
-                    "away_goals": None,
                 })
     upcoming.sort(key=lambda x: (x["date"], x.get("time", "")))
-    return upcoming
+    return upcoming[:10]
 
 
 # ---------- Prediction helpers ----------
@@ -206,12 +200,11 @@ def build_feature_dict(home_key, away_key, match_date=None):
 
 
 def predict(home_key, away_key, match_date):
+    """Stacked prediction. Returns (p_home, p_draw, p_away) or None."""
     if home_key not in final_state['elo'] or away_key not in final_state['elo']:
         return None
     feats = build_feature_dict(home_key, away_key, match_date)
-    X = pd.DataFrame([feats], columns=FEATURE_COLS)
-    proba = model.predict_proba(X)[0]
-    return float(proba[0]), float(proba[1]), float(proba[2])
+    return stacked.predict(feats, home_key, away_key)
 
 
 def get_odds_from_data(home_key, away_key, match_date):
@@ -231,9 +224,7 @@ def get_odds_from_data(home_key, away_key, match_date):
 
 
 def render_match_analysis(home_raw, away_raw, home_key, away_key,
-                          match_date, stake_ugx, date_str, key_suffix,
-                          status_long=None, home_goals=None, away_goals=None):
-    """Render model probs, H2H, odds input, and recommendations for one match."""
+                          match_date, stake_ugx, date_str, key_suffix):
     result = predict(home_key, away_key, match_date)
     if result is None:
         st.warning(f"Prediction unavailable — one or both teams "
@@ -242,14 +233,13 @@ def render_match_analysis(home_raw, away_raw, home_key, away_key,
 
     p_home, p_draw, p_away = result
 
-    # ---------- Model probabilities ----------
-    st.markdown("**Model probabilities**")
+    st.markdown("**Model probabilities** *(stacked: LR + Dixon-Coles + base rates)*")
     c1, c2, c3 = st.columns(3)
     c1.metric("Home win", f"{p_home*100:.1f}%")
     c2.metric("Draw", f"{p_draw*100:.1f}%")
     c3.metric("Away win", f"{p_away*100:.1f}%")
 
-    # ---------- Head-to-Head ----------
+    # Head-to-head
     st.markdown("**Head-to-Head (last 5 meetings)**")
     h2h_rows, h2h_summary = get_head_to_head(matches, home_key, away_key, n=5)
     if not h2h_rows:
@@ -257,19 +247,17 @@ def render_match_analysis(home_raw, away_raw, home_key, away_key,
     else:
         h2h_df = pd.DataFrame(h2h_rows)
         h2h_df.columns = ['Date', 'Home', 'Away', 'Home G', 'Away G', 'Result']
-        st.dataframe(h2h_df, width='stretch', hide_index=True)
+        st.dataframe(h2h_df, use_container_width=True, hide_index=True)
         h2h_feature = final_state['h2h'].get((home_key, away_key), 1.0)
         st.caption(
             f"Summary: {h2h_summary['home_wins']} {home_raw} wins, "
             f"{h2h_summary['draws']} draws, "
             f"{h2h_summary['away_wins']} {away_raw} wins. "
             f"Average total goals: {h2h_summary['avg_total_goals']:.1f}. "
-            f"Model H2H feature (home perspective): {h2h_feature:.2f} "
-            f"(neutral = 1.00)."
+            f"Model H2H feature (home perspective): {h2h_feature:.2f}."
         )
     st.divider()
 
-    # ---------- Odds input ----------
     hist_oh, hist_od, hist_oa = get_odds_from_data(home_key, away_key, match_date)
 
     st.markdown("**Bookmaker odds** *(edit to try different prices)*")
@@ -297,7 +285,6 @@ def render_match_analysis(home_raw, away_raw, home_key, away_key,
         st.caption("⚠️ No historical odds for this match — "
                    "enter your bookmaker's current prices above.")
 
-    # ---------- Recommendations ----------
     recs = generate_recommendations(
         home_raw, away_raw, p_home, p_draw, p_away,
         odds_home=oh, odds_draw=od, odds_away=oa,
@@ -313,9 +300,6 @@ def render_match_analysis(home_raw, away_raw, home_key, away_key,
     if tp['ev_ugx'] is not None:
         ev_colour = "🟢" if tp['ev_ugx'] > 0 else "🔴"
         st.write(f"{ev_colour} Expected Value: **UGX {tp['ev_ugx']:+,.0f}**")
-        if tp['ev_ugx'] < 0:
-            st.caption("Negative EV means the odds are worse than "
-                       "the model's probability suggests.")
     st.divider()
 
     tdc = recs['top_double_chance']
@@ -334,6 +318,8 @@ def render_match_analysis(home_raw, away_raw, home_key, away_key,
 
 # ---------- UI ----------
 st.title("⚽ Soccer Match Predictor")
+st.caption("Model: stacked (Logistic Regression + Dixon-Coles + base rates)")
+
 tab1, tab2 = st.tabs(["🗓️ Fixtures by Date", "📊 Match Analyser"])
 
 
@@ -341,7 +327,6 @@ tab1, tab2 = st.tabs(["🗓️ Fixtures by Date", "📊 Match Analyser"])
 with tab1:
     st.write("Pick any date to see Premier League fixtures and predictions.")
     st.caption("Past matches show final scores and prediction accuracy.")
-    st.caption("Available seasons: 2020-21 through 2026-27.")
 
     if "selected_date" not in st.session_state:
         st.session_state.selected_date = datetime(2025, 9, 27).date()
@@ -450,7 +435,6 @@ with tab2:
             key="analyser_stake",
         )
 
-    # Toggle: Upcoming vs specific date
     mode = st.radio(
         "Show:",
         ["Upcoming fixtures (next 21 days)", "Fixtures on a specific date"],
@@ -479,7 +463,6 @@ with tab2:
                         date_str=fx["date"].strftime("%Y-%m-%d"),
                         key_suffix=f"up_{fx['date']}_{fx['home']}_{fx['away']}",
                     )
-
     else:
         if "analyser_date" not in st.session_state:
             st.session_state.analyser_date = datetime(2024, 9, 21).date()
