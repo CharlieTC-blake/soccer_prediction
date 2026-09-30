@@ -238,7 +238,7 @@ def render_match_analysis(home_raw, away_raw, home_key, away_key,
     else:
         h2h_df = pd.DataFrame(h2h_rows)
         h2h_df.columns = ['Date', 'Home', 'Away', 'Home G', 'Away G', 'Result']
-        st.dataframe(h2h_df, use_container_width=True, hide_index=True)
+        st.dataframe(h2h_df, width='stretch', hide_index=True)
         h2h_feature = final_state['h2h'].get((home_key, away_key), 1.0)
         st.caption(
             f"Summary: {h2h_summary['home_wins']} {home_raw} wins, "
@@ -323,7 +323,7 @@ def render_match_analysis(home_raw, away_raw, home_key, away_key,
                 'ev_display': 'EV (UGX)',
             }
         )
-        st.dataframe(display_df, use_container_width=True, hide_index=True)
+        st.dataframe(display_df, width='stretch', hide_index=True)
 
     if extra is None:
         st.caption("Note: O/U and BTTS unavailable for this match "
@@ -534,3 +534,4 @@ st.caption("Predictions use each team's Elo and form as of the last match "
            "in the dataset. Not intended for betting advice.")
 st.caption("Model and code: [github.com/CharlieTC-blake/soccer_prediction]"
            "(https://github.com/CharlieTC-blake/soccer_prediction)")
+
