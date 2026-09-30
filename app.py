@@ -1,10 +1,10 @@
-"""
+﻿"""
 Streamlit app for the soccer prediction model.
 
 Tabs:
-  1. Next Fixtures — dynamic upcoming fixtures with expandable predictions
-     and EV calculator.
-  2. Fixtures by Date — historical and upcoming fixtures with accuracy.
+  1. Next Fixtures — upcoming fixtures with expandable predictions
+  2. Fixtures by Date — historical and upcoming fixtures with accuracy
+  3. Match Analyser — model-driven recommendations with UGX stake and EV
 """
 import os
 import pandas as pd
@@ -22,6 +22,10 @@ from soccer_pipeline import (
 from odds_utils import (
     remove_overround_proportional, remove_overround_shin, compute_ev,
 )
+from match_analyser import (
+    generate_recommendations, compute_ev_ugx, fair_odds,
+    DEFAULT_STAKE_UGX,
+)
 
 st.set_page_config(page_title="Soccer Predictor", page_icon="⚽", layout="wide")
 
@@ -35,7 +39,7 @@ def load_data():
     for f in sorted(glob.glob(os.path.join(data_dir, 'season-*.csv'))):
         frames.append(pd.read_csv(f))
     df = pd.concat(frames, ignore_index=True)
-    df['Date'] = pd.to_datetime(df['Date'], format='%d/%m/%Y')
+    df['Date'] = pd.to_datetime(df['Date'], format='ISO8601')
     df = df.sort_values('Date').reset_index(drop=True)
     df = df.dropna(subset=['FTHG', 'FTAG', 'FTR'])
     return df
@@ -133,6 +137,7 @@ def fetch_fixtures_for_date(date_str):
                 "fixture": {"status": {"short": status_short, "long": status_long}},
                 "goals": {"home": home_goals, "away": away_goals},
                 "time": m.get("time", ""),
+                "date": m.get("date", ""),
             })
         return formatted, None
     except Exception as e:
@@ -174,7 +179,7 @@ def fetch_upcoming_fixtures(days_ahead=21):
     return upcoming[:10]
 
 
-# ---------- Prediction helper ----------
+# ---------- Prediction helpers ----------
 def build_feature_dict(home_key, away_key, match_date=None):
     if match_date is None:
         match_date = datetime.now().date()
@@ -196,79 +201,50 @@ def build_feature_dict(home_key, away_key, match_date=None):
         'goals_scored_diff': hgs - ags,
         'goals_conceded_diff': hgc - agc,
         'h2h_home_points_L3': h2h,
+        'xg_created_diff': 0.0,
+        'xg_conceded_diff': 0.0,
     }
 
 
-def render_prediction_and_ev(home_raw, away_raw, match_date, key_suffix=""):
-    home_key = translate_team(home_raw)
-    away_key = translate_team(away_raw)
+def predict(home_key, away_key, match_date):
+    """Returns (p_home, p_draw, p_away) or None if team unknown."""
     if home_key not in final_state['elo'] or away_key not in final_state['elo']:
-        st.warning(f"Prediction unavailable — one or both teams not in training "
-                   f"data ({home_key}, {away_key}).")
-        return
-
+        return None
     feats = build_feature_dict(home_key, away_key, match_date)
     X = pd.DataFrame([feats], columns=FEATURE_COLS)
     proba = model.predict_proba(X)[0]
+    return float(proba[0]), float(proba[1]), float(proba[2])
 
-    c1, c2, c3 = st.columns(3)
-    c1.metric("Home win", f"{proba[0]*100:.1f}%")
-    c2.metric("Draw", f"{proba[1]*100:.1f}%")
-    c3.metric("Away win", f"{proba[2]*100:.1f}%")
 
-    with st.expander("Features used by the model"):
-        df_feat = pd.DataFrame([feats]).T.rename(columns={0: "value"})
-        st.dataframe(df_feat, use_container_width=True)
-
-    st.markdown("**Enter bookmaker's odds to calculate EV**")
-    o1, o2, o3 = st.columns(3)
-    with o1:
-        oh = st.number_input("Home odds", min_value=1.01, value=2.00, step=0.01,
-                              key=f"oh_{home_key}_{away_key}_{key_suffix}")
-    with o2:
-        od = st.number_input("Draw odds", min_value=1.01, value=3.40, step=0.01,
-                              key=f"od_{home_key}_{away_key}_{key_suffix}")
-    with o3:
-        oa = st.number_input("Away odds", min_value=1.01, value=3.50, step=0.01,
-                              key=f"oa_{home_key}_{away_key}_{key_suffix}")
-
-    method = st.radio("Overround removal", ["Proportional", "Shin"],
-                       horizontal=True,
-                       key=f"m_{home_key}_{away_key}_{key_suffix}")
-    odds = [oh, od, oa]
-    try:
-        if method == "Proportional":
-            book_probs, overround = remove_overround_proportional(odds)
-        else:
-            book_probs, overround = remove_overround_shin(odds)
-    except ValueError as e:
-        st.error(f"Invalid odds: {e}")
-        return
-
-    st.caption(f"Bookmaker overround: {overround*100:.2f}%")
-    st.caption(f"Fair probabilities — "
-               f"Home {book_probs[0]*100:.1f}% | "
-               f"Draw {book_probs[1]*100:.1f}% | "
-               f"Away {book_probs[2]*100:.1f}%")
-
-    evs = compute_ev(proba, odds)
-    st.markdown("**Expected Value per £1 stake**")
-    ec1, ec2, ec3 = st.columns(3)
-    for col, name, ev in zip([ec1, ec2, ec3], ["Home", "Draw", "Away"], evs):
-        colour = "🟢" if ev > 0 else "🔴"
-        col.metric(f"{name} EV", f"{ev:+.3f}",
-                   help=f"{colour} {'Positive' if ev > 0 else 'Negative'} EV")
+def get_odds_from_data(home_key, away_key, match_date):
+    """Look up historical Bet365 odds for a specific match."""
+    mask = ((matches['Date'].dt.date == match_date) &
+            (matches['HomeTeam'] == home_key) &
+            (matches['AwayTeam'] == away_key))
+    row = matches[mask]
+    if len(row) == 0:
+        return None, None, None
+    r = row.iloc[0]
+    oh = r.get('B365H')
+    od = r.get('B365D')
+    oa = r.get('B365A')
+    if pd.isna(oh) or pd.isna(od) or pd.isna(oa):
+        return None, None, None
+    return float(oh), float(od), float(oa)
 
 
 # ---------- UI ----------
 st.title("⚽ Soccer Match Predictor")
-tab1, tab2 = st.tabs(["📅 Next Fixtures", "🗓️ Fixtures by Date"])
+tab1, tab2, tab3 = st.tabs(["📅 Next Fixtures", "🗓️ Fixtures by Date", "📊 Match Analyser"])
 
 
+# ============ Tab 1: Next Fixtures ============
 with tab1:
-    st.write("Upcoming Premier League fixtures. Expand any match to see "
-             "the model's prediction and calculate Expected Value.")
+    st.write("Upcoming Premier League fixtures. Expand any match to see the "
+             "model's prediction and calculate Expected Value.")
+
     fixtures = fetch_upcoming_fixtures(days_ahead=21)
+
     if not fixtures:
         st.info("No upcoming fixtures found in the next 3 weeks.")
     else:
@@ -277,12 +253,63 @@ with tab1:
             label = (f"**{fx['home']}** vs **{fx['away']}** — "
                      f"{date_str} {fx.get('time', '')}")
             with st.expander(label, expanded=False):
-                render_prediction_and_ev(
-                    fx["home"], fx["away"], fx["date"],
-                    key_suffix=f"{fx['date']}_{fx['home']}_{fx['away']}"
-                )
+                home_key = translate_team(fx["home"])
+                away_key = translate_team(fx["away"])
+
+                result = predict(home_key, away_key, fx["date"])
+                if result is None:
+                    st.warning(f"Prediction unavailable — one or both teams "
+                               f"not in training data ({home_key}, {away_key}).")
+                    continue
+
+                p_home, p_draw, p_away = result
+
+                c1, c2, c3 = st.columns(3)
+                c1.metric("Home win", f"{p_home*100:.1f}%")
+                c2.metric("Draw", f"{p_draw*100:.1f}%")
+                c3.metric("Away win", f"{p_away*100:.1f}%")
+
+                with st.expander("Features used by the model"):
+                    feats = build_feature_dict(home_key, away_key, fx["date"])
+                    st.dataframe(pd.DataFrame([feats]).T.rename(columns={0: "value"}))
+
+                st.markdown("**Enter bookmaker's odds to calculate EV**")
+                o1, o2, o3 = st.columns(3)
+                key_suffix = f"{fx['date']}_{fx['home']}_{fx['away']}"
+                with o1:
+                    oh = st.number_input("Home odds", min_value=1.01, value=2.00,
+                                          step=0.01, key=f"n_oh_{key_suffix}")
+                with o2:
+                    od = st.number_input("Draw odds", min_value=1.01, value=3.40,
+                                          step=0.01, key=f"n_od_{key_suffix}")
+                with o3:
+                    oa = st.number_input("Away odds", min_value=1.01, value=3.50,
+                                          step=0.01, key=f"n_oa_{key_suffix}")
+
+                odds = [oh, od, oa]
+                try:
+                    book_probs, overround = remove_overround_proportional(odds)
+                except ValueError as e:
+                    st.error(f"Invalid odds: {e}")
+                    continue
+
+                st.caption(f"Bookmaker overround: {overround*100:.2f}%")
+                st.caption(f"Fair probabilities — "
+                           f"Home {book_probs[0]*100:.1f}% | "
+                           f"Draw {book_probs[1]*100:.1f}% | "
+                           f"Away {book_probs[2]*100:.1f}%")
+
+                evs = compute_ev([p_home, p_draw, p_away], odds)
+                st.markdown("**Expected Value per £1 stake**")
+                ec1, ec2, ec3 = st.columns(3)
+                for col, name, ev in zip([ec1, ec2, ec3],
+                                          ["Home", "Draw", "Away"], evs):
+                    colour = "🟢" if ev > 0 else "🔴"
+                    col.metric(f"{name} EV", f"{ev:+.3f}",
+                               help=f"{colour} {'Positive' if ev > 0 else 'Negative'} EV")
 
 
+# ============ Tab 2: Fixtures by Date ============
 with tab2:
     st.write("Pick any date to see Premier League fixtures and predictions.")
     st.caption("Past matches show final scores and prediction accuracy.")
@@ -298,7 +325,7 @@ with tab2:
             value=st.session_state.selected_date,
             min_value=datetime(2020, 9, 1).date(),
             max_value=datetime(2027, 5, 31).date(),
-            key="date_picker",
+            key="date_picker_t2",
         )
     with col_b:
         st.write("")
@@ -306,7 +333,7 @@ with tab2:
         jump_option = st.selectbox(
             "Quick jump to",
             ["(no jump)", "2026-27 season", "2025-26 season", "2024-25 season"],
-            key="jump_select",
+            key="jump_select_t2",
         )
         if jump_option == "2026-27 season":
             selected_date = datetime(2026, 9, 30).date()
@@ -339,18 +366,18 @@ with tab2:
             home_key = translate_team(home_raw)
             away_key = translate_team(away_raw)
 
-            if home_key in final_state['elo'] and away_key in final_state['elo']:
-                feats = build_feature_dict(home_key, away_key, selected_date)
-                X = pd.DataFrame([feats], columns=FEATURE_COLS)
-                proba = model.predict_proba(X)[0]
+            result = predict(home_key, away_key, selected_date)
+            if result is not None:
+                p_home, p_draw, p_away = result
+                proba = [p_home, p_draw, p_away]
                 pred_idx = int(np.argmax(proba))
                 pred_label = ["Home win", "Draw", "Away win"][pred_idx]
 
                 st.markdown(f"**{home_raw} vs {away_raw}** — {status_long}")
                 c1, c2, c3 = st.columns(3)
-                c1.metric("Home", f"{proba[0]*100:.1f}%")
-                c2.metric("Draw", f"{proba[1]*100:.1f}%")
-                c3.metric("Away", f"{proba[2]*100:.1f}%")
+                c1.metric("Home", f"{p_home*100:.1f}%")
+                c2.metric("Draw", f"{p_draw*100:.1f}%")
+                c3.metric("Away", f"{p_away*100:.1f}%")
 
                 if (status_short in ("FT", "AET", "PEN")
                         and home_goals is not None and away_goals is not None):
@@ -379,6 +406,150 @@ with tab2:
             st.info(f"Model accuracy on {scored_count} finished match(es): "
                     f"{correct_count}/{scored_count} "
                     f"({100*correct_count/scored_count:.0f}%)")
+
+
+# ============ Tab 3: Match Analyser ============
+with tab3:
+    st.write("Model-driven recommendations for each fixture. "
+             "Enter your bookmaker's odds to see Expected Value.")
+    st.caption("Recommendations are derived from the model, not the bookmaker. "
+               "Not financial advice.")
+
+    # Global stake input
+    stake_col, _ = st.columns([1, 3])
+    with stake_col:
+        stake_ugx = st.number_input(
+            "Stake per bet (UGX)",
+            min_value=100, max_value=10_000_000,
+            value=DEFAULT_STAKE_UGX, step=100,
+            key="analyser_stake",
+        )
+
+    # Date picker
+    if "analyser_date" not in st.session_state:
+        st.session_state.analyser_date = datetime(2025, 9, 27).date()
+
+    analyser_date = st.date_input(
+        "Select a date",
+        value=st.session_state.analyser_date,
+        min_value=datetime(2020, 9, 1).date(),
+        max_value=datetime(2027, 5, 31).date(),
+        key="analyser_date_picker",
+    )
+    st.session_state.analyser_date = analyser_date
+
+    date_str = analyser_date.strftime("%Y-%m-%d")
+    full_date = analyser_date.strftime(f"{analyser_date.strftime('%A')}, %d %B %Y")
+    st.subheader(f"📅 {full_date}")
+
+    fixtures, error = fetch_fixtures_for_date(date_str)
+    if error:
+        st.warning(error)
+    elif not fixtures:
+        st.info(f"No Premier League fixtures found on {full_date}.")
+    else:
+        st.caption(f"{len(fixtures)} match(es) on this date. "
+                   f"Expand any match to see recommendations.")
+
+        for match in fixtures:
+            home_raw = match["teams"]["home"]["name"]
+            away_raw = match["teams"]["away"]["name"]
+            status_short = match["fixture"]["status"]["short"]
+            status_long = match["fixture"]["status"]["long"]
+            home_goals = match["goals"]["home"]
+            away_goals = match["goals"]["away"]
+
+            home_key = translate_team(home_raw)
+            away_key = translate_team(away_raw)
+
+            score_str = ""
+            if home_goals is not None and away_goals is not None:
+                score_str = f" — Final: {home_goals}–{away_goals}"
+
+            label = f"**{home_raw}** vs **{away_raw}** — {status_long}{score_str}"
+
+            with st.expander(label, expanded=False):
+                result = predict(home_key, away_key, analyser_date)
+                if result is None:
+                    st.warning(f"Prediction unavailable — one or both teams "
+                               f"not in training data ({home_key}, {away_key}).")
+                    continue
+
+                p_home, p_draw, p_away = result
+
+                # Try to find historical odds
+                hist_oh, hist_od, hist_oa = get_odds_from_data(
+                    home_key, away_key, analyser_date
+                )
+
+                st.markdown("**Model probabilities**")
+                c1, c2, c3 = st.columns(3)
+                c1.metric("Home win", f"{p_home*100:.1f}%")
+                c2.metric("Draw", f"{p_draw*100:.1f}%")
+                c3.metric("Away win", f"{p_away*100:.1f}%")
+
+                st.markdown("**Bookmaker odds** *(edit to try different prices)*")
+                key_suffix = f"ma_{date_str}_{home_key}_{away_key}"
+                o1, o2, o3 = st.columns(3)
+                with o1:
+                    oh = st.number_input(
+                        "Home odds", min_value=1.01,
+                        value=float(hist_oh) if hist_oh is not None else 2.00,
+                        step=0.01, key=f"ma_oh_{key_suffix}",
+                    )
+                with o2:
+                    od = st.number_input(
+                        "Draw odds", min_value=1.01,
+                        value=float(hist_od) if hist_od is not None else 3.40,
+                        step=0.01, key=f"ma_od_{key_suffix}",
+                    )
+                with o3:
+                    oa = st.number_input(
+                        "Away odds", min_value=1.01,
+                        value=float(hist_oa) if hist_oa is not None else 3.50,
+                        step=0.01, key=f"ma_oa_{key_suffix}",
+                    )
+
+                if hist_oh is None:
+                    st.caption("⚠️ No historical odds for this match — "
+                               "enter your bookmaker's current prices above.")
+
+                # Generate recommendations
+                recs = generate_recommendations(
+                    home_raw, away_raw, p_home, p_draw, p_away,
+                    odds_home=oh, odds_draw=od, odds_away=oa,
+                    stake_ugx=stake_ugx,
+                )
+
+                st.markdown(f"**Recommendations for a stake of UGX {stake_ugx:,}**")
+
+                # Top pick
+                tp = recs['top_pick']
+                st.markdown(f"**🥇 Top pick: {tp['label']}**")
+                st.write(f"Model probability: **{tp['prob']*100:.1f}%**")
+                st.write(f"Fair odds (break-even): **{tp['fair_odds']:.2f}**")
+                if tp['ev_ugx'] is not None:
+                    ev_colour = "🟢" if tp['ev_ugx'] > 0 else "🔴"
+                    st.write(f"{ev_colour} Expected Value: **UGX {tp['ev_ugx']:+,.0f}**")
+                    if tp['ev_ugx'] < 0:
+                        st.caption("Negative EV means the odds are worse than "
+                                   "the model's probability suggests.")
+                st.divider()
+
+                # Top double chance
+                tdc = recs['top_double_chance']
+                st.markdown(f"**🥈 Top double chance: {tdc['label']}**")
+                st.write(f"Combined probability: **{tdc['prob']*100:.1f}%**")
+                st.write(f"Fair odds (break-even): **{tdc['fair_odds']:.2f}**")
+                st.divider()
+
+                # Avoid
+                av = recs['avoid']
+                st.markdown(f"**🚫 Avoid: {av['label']}** "
+                            f"({av['prob']*100:.1f}% model probability)")
+
+                st.caption("⚠️ Recommendations are model-derived. "
+                           "Not financial advice. Bet only what you can afford to lose.")
 
 
 st.caption("⚠️ Predictions use each team's Elo and form as of the last match "
